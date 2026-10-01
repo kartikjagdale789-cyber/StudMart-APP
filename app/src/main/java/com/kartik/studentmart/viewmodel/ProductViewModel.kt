@@ -14,6 +14,7 @@ import com.kartik.studentmart.data.model.NotificationItem
 import com.kartik.studentmart.data.model.Offer
 import com.kartik.studentmart.data.model.Product
 import com.kartik.studentmart.data.model.PurchaseRequest
+import com.kartik.studentmart.data.model.User
 import com.kartik.studentmart.data.repository.StudMartRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.awaitClose
@@ -49,6 +50,11 @@ class ProductViewModel : ViewModel() {
     val userProducts = currentUserIdFlow.flatMapLatest { uid ->
         if (uid.isNullOrBlank()) flowOf(emptyList()) else repository.getUserProductsFlow(uid)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val userProfile = currentUserIdFlow.flatMapLatest { uid ->
+        if (uid.isNullOrBlank()) flowOf(null) else repository.getUserProfileFlow(uid)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val wishlistProductIds = currentUserIdFlow.flatMapLatest { uid ->
@@ -141,6 +147,102 @@ class ProductViewModel : ViewModel() {
     fun deleteNotification(notificationId: String) {
         viewModelScope.launch {
             repository.deleteNotification(notificationId)
+        }
+    }
+
+    fun updateUserProfile(fullName: String, profileImageUrl: String, onResult: (Boolean) -> Unit) {
+        val uid = currentUserId
+        if (uid == null) {
+            errorMessage = "User not logged in."
+            onResult(false)
+            return
+        }
+        if (fullName.isBlank()) {
+            errorMessage = "Name cannot be empty."
+            onResult(false)
+            return
+        }
+        isLoading = true
+        errorMessage = null
+        viewModelScope.launch {
+            try {
+                val result = repository.updateUserProfile(uid, fullName, profileImageUrl)
+                isLoading = false
+                result.fold(
+                    onSuccess = {
+                        successMessage = "Profile updated successfully!"
+                        onResult(true)
+                    },
+                    onFailure = { err ->
+                        errorMessage = err.message ?: "Failed to update profile."
+                        onResult(false)
+                    }
+                )
+            } catch (e: Exception) {
+                isLoading = false
+                errorMessage = e.message ?: "Failed to update profile."
+                onResult(false)
+            }
+        }
+    }
+
+    fun updatePassword(newPass: String, confirmPass: String, onSuccess: () -> Unit) {
+        if (newPass.isBlank() || newPass.length < 6) {
+            errorMessage = "Password must be at least 6 characters."
+            return
+        }
+        if (newPass != confirmPass) {
+            errorMessage = "Passwords do not match."
+            return
+        }
+        isLoading = true
+        errorMessage = null
+        viewModelScope.launch {
+            try {
+                val result = repository.updatePassword(newPass)
+                result.fold(
+                    onSuccess = {
+                        successMessage = "Password updated successfully!"
+                        onSuccess()
+                    },
+                    onFailure = { err ->
+                        errorMessage = err.message ?: "Failed to update password. You may need to re-login."
+                    }
+                )
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "Failed to update password."
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    fun deleteAccount(onSuccess: () -> Unit) {
+        isLoading = true
+        errorMessage = null
+        viewModelScope.launch {
+            try {
+                val result = repository.deleteUserAccount()
+                result.fold(
+                    onSuccess = { onSuccess() },
+                    onFailure = { err ->
+                        errorMessage = err.message ?: "Failed to delete account. You may need to re-login."
+                    }
+                )
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "Failed to delete account."
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    suspend fun uploadSingleImage(uri: Uri): Result<String> {
+        val result = repository.uploadImages(listOf(uri))
+        return if (result.isSuccess) {
+            Result.success(result.getOrNull()?.firstOrNull() ?: "")
+        } else {
+            Result.failure(result.exceptionOrNull() ?: Exception("Upload failed"))
         }
     }
 

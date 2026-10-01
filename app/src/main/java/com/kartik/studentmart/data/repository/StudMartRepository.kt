@@ -7,12 +7,14 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
 import com.kartik.studentmart.data.model.Chat
 import com.kartik.studentmart.data.model.ChatMessage
 import com.kartik.studentmart.data.model.NotificationItem
 import com.kartik.studentmart.data.model.Offer
 import com.kartik.studentmart.data.model.Product
 import com.kartik.studentmart.data.model.PurchaseRequest
+import com.kartik.studentmart.data.model.User
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -40,6 +42,115 @@ class StudMartRepository {
 
     val currentUserId get() = auth.currentUser?.uid
     val currentUserName get() = auth.currentUser?.displayName ?: auth.currentUser?.email?.substringBefore("@") ?: "Student"
+
+    // User Profile
+    fun getUserProfileFlow(userId: String): Flow<User?> = callbackFlow {
+        if (userId.isBlank()) {
+            trySend(null)
+            awaitClose { }
+            return@callbackFlow
+        }
+        val docRef = firestore.collection("users").document(userId)
+        val listener = docRef.addSnapshotListener { snapshot, error ->
+            if (error != null) {
+                Log.e("StudMartProfile", "Error fetching profile: ${error.message}", error)
+                trySend(null)
+                return@addSnapshotListener
+            }
+            if (snapshot == null || !snapshot.exists()) {
+                val authUser = auth.currentUser
+                val fallbackName = authUser?.displayName?.ifBlank { null }
+                    ?: authUser?.email?.substringBefore("@")
+                    ?: "Student"
+                val fallback = User(
+                    userId = userId,
+                    fullName = fallbackName,
+                    email = authUser?.email ?: "",
+                    profileImageUrl = authUser?.photoUrl?.toString() ?: "",
+                    createdAt = System.currentTimeMillis(),
+                    updatedAt = System.currentTimeMillis(),
+                    role = "student"
+                )
+                docRef.set(fallback.toMap(), SetOptions.merge())
+                trySend(fallback)
+            } else {
+                val data = snapshot.data
+                if (data != null) {
+                    trySend(User.fromMap(data, snapshot.id))
+                } else {
+                    trySend(null)
+                }
+            }
+        }
+        awaitClose { listener.remove() }
+    }
+
+    suspend fun updateUserProfile(userId: String, fullName: String, profileImageUrl: String): Result<Unit> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val docRef = firestore.collection("users").document(userId)
+                val doc = docRef.get().await()
+                if (doc.exists() && doc.data != null) {
+                    val updates = mutableMapOf<String, Any>(
+                        "fullName" to fullName.trim(),
+                        "updatedAt" to System.currentTimeMillis()
+                    )
+                    if (profileImageUrl.isNotBlank()) {
+                        updates["profileImageUrl"] = profileImageUrl
+                    }
+                    docRef.update(updates).await()
+                } else {
+                    val authUser = auth.currentUser
+                    val newDoc = User(
+                        userId = userId,
+                        fullName = fullName.trim(),
+                        email = authUser?.email ?: "",
+                        profileImageUrl = profileImageUrl,
+                        createdAt = System.currentTimeMillis(),
+                        updatedAt = System.currentTimeMillis(),
+                        role = "student"
+                    )
+                    docRef.set(newDoc.toMap()).await()
+                }
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Log.e("StudMartProfile", "Failed to update profile", e)
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun updatePassword(newPassword: String): Result<Unit> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val user = auth.currentUser ?: return@withContext Result.failure(Exception("No user logged in."))
+                user.updatePassword(newPassword).await()
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun deleteUserAccount(): Result<Unit> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val user = auth.currentUser ?: return@withContext Result.failure(Exception("No user logged in."))
+                val uid = user.uid
+
+                try {
+                    firestore.collection("users").document(uid).delete().await()
+                } catch (e: Exception) {
+                    Log.e("StudMartDelete", "Failed to delete user Firestore profile", e)
+                }
+
+                user.delete().await()
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
 
     // Notifications
     suspend fun createNotification(
@@ -513,8 +624,8 @@ class StudMartRepository {
                 offerRef.set(offer.toMap()).await()
 
                 // Automatically link offer to Chat
-                val chatResult = getOrCreateChat(product)
                 var chatIdVal = ""
+                val chatResult = getOrCreateChat(product)
                 if (chatResult.isSuccess) {
                     chatIdVal = chatResult.getOrThrow()
                     val msgRef = firestore.collection("chats").document(chatIdVal).collection("messages").document()

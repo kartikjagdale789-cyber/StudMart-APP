@@ -239,6 +239,8 @@ fun AppNavigation() {
                     onNavigateToReceivedOffers = { navController.navigate(Screen.ReceivedOffers.route) },
                     onNavigateToSellerRequests = { navController.navigate(Screen.SellerRequests.route) },
                     onNavigateToMyChats = { navController.navigate(Screen.MyChats.route) },
+                    onNavigateToWishlist = { navController.navigate(Screen.Wishlist.route) },
+                    onNavigateToNotifications = { navController.navigate(Screen.Notifications.route) },
                     onNavigateToAdmin = { navController.navigate(Screen.AdminDashboard.route) },
                     onLogout = {
                         navController.navigate(Screen.Login.route) {
