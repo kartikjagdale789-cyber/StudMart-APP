@@ -4,6 +4,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -19,11 +22,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kartik.studentmart.data.model.CategoryItem
+import com.kartik.studentmart.ui.components.FilterBottomSheet
 import com.kartik.studentmart.ui.components.ProductCard
+import com.kartik.studentmart.viewmodel.FilterState
 import com.kartik.studentmart.viewmodel.ProductViewModel
+import com.kartik.studentmart.viewmodel.SortOrder
 
 val sampleCategories = listOf(
     CategoryItem("1", "Books", Icons.AutoMirrored.Filled.MenuBook),
@@ -52,9 +59,12 @@ fun HomeScreen(
     onNavigateToLogin: (() -> Unit)? = null,
     productViewModel: ProductViewModel = viewModel()
 ) {
-    var searchQuery by remember { mutableStateOf("") }
-    val activeProducts by productViewModel.activeProducts.collectAsState()
+    val filterState by productViewModel.filterState.collectAsState()
+    val filteredProducts by productViewModel.filteredProducts.collectAsState()
     val wishlistIds by productViewModel.wishlistProductIds.collectAsState()
+    val unreadCount by productViewModel.unreadNotificationCount.collectAsState()
+
+    var showFilterSheet by remember { mutableStateOf(false) }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -101,8 +111,6 @@ fun HomeScreen(
                     }
                 }
 
-                val unreadCount by productViewModel.unreadNotificationCount.collectAsState()
-
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onNavigateToChat) {
                         Icon(Icons.Default.ChatBubbleOutline, contentDescription = "Chat")
@@ -126,67 +134,135 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Search Bar
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text("Search products...") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search") },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Clear, contentDescription = "Clear search")
-                        }
-                    }
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(24.dp),
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Sell Product Banner / Button
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onNavigateToSell),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+            // Search Bar & Filter Button Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Got something to sell?",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                OutlinedTextField(
+                    value = filterState.searchQuery,
+                    onValueChange = { productViewModel.updateSearchQuery(it) },
+                    placeholder = { Text("Search products...") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search") },
+                    trailingIcon = {
+                        if (filterState.searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { productViewModel.updateSearchQuery("") }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier.weight(1f)
+                )
+
+                Box {
+                    IconButton(
+                        onClick = { showFilterSheet = true },
+                        colors = IconButtonDefaults.iconButtonColors(
+                            containerColor = if (filterState.isFiltered) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "List books, electronics, cycles & more instantly!",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                    ) {
+                        Icon(
+                            Icons.Default.Tune,
+                            contentDescription = "Filter",
+                            tint = if (filterState.isFiltered) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    Button(
-                        onClick = onNavigateToSell,
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Sell")
+                    if (filterState.isFiltered) {
+                        Badge(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .offset(x = (-2).dp, y = 2.dp)
+                        )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            // Active Filter Chips Bar
+            if (filterState.isFiltered) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        if (filterState.category.isNotBlank() && !filterState.category.equals("All", ignoreCase = true)) {
+                            item {
+                                InputChip(
+                                    selected = true,
+                                    onClick = { productViewModel.updateCategoryFilter("All") },
+                                    label = { Text("Cat: ${filterState.category}") },
+                                    trailingIcon = { Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                )
+                            }
+                        }
+                        if (filterState.minPrice != null || filterState.maxPrice != null) {
+                            item {
+                                InputChip(
+                                    selected = true,
+                                    onClick = { productViewModel.updateFilterState(filterState.copy(minPrice = null, maxPrice = null)) },
+                                    label = { Text("Price: ${filterState.minPrice?.toInt() ?: 0} - ${filterState.maxPrice?.toInt() ?: "Max"}") },
+                                    trailingIcon = { Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                )
+                            }
+                        }
+                        if (filterState.condition.isNotBlank() && !filterState.condition.equals("All", ignoreCase = true)) {
+                            item {
+                                InputChip(
+                                    selected = true,
+                                    onClick = { productViewModel.updateFilterState(filterState.copy(condition = "All")) },
+                                    label = { Text("Cond: ${filterState.condition}") },
+                                    trailingIcon = { Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                )
+                            }
+                        }
+                        if (filterState.location.isNotBlank()) {
+                            item {
+                                InputChip(
+                                    selected = true,
+                                    onClick = { productViewModel.updateFilterState(filterState.copy(location = "")) },
+                                    label = { Text("Loc: ${filterState.location}") },
+                                    trailingIcon = { Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                )
+                            }
+                        }
+                        if (filterState.exchangeAvailableOnly) {
+                            item {
+                                InputChip(
+                                    selected = true,
+                                    onClick = { productViewModel.updateFilterState(filterState.copy(exchangeAvailableOnly = false)) },
+                                    label = { Text("Exchange Only") },
+                                    trailingIcon = { Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                )
+                            }
+                        }
+                        if (filterState.sortOrder != SortOrder.NEWEST) {
+                            item {
+                                InputChip(
+                                    selected = true,
+                                    onClick = { productViewModel.updateFilterState(filterState.copy(sortOrder = SortOrder.NEWEST)) },
+                                    label = {
+                                        Text(if (filterState.sortOrder == SortOrder.PRICE_LOW_TO_HIGH) "Price: Low→High" else "Price: High→Low")
+                                    },
+                                    trailingIcon = { Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                )
+                            }
+                        }
+                    }
+
+                    TextButton(onClick = { productViewModel.clearFilters() }) {
+                        Text("Clear All")
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Categories Section Header
             Row(
@@ -215,18 +291,21 @@ fun HomeScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
                             .width(72.dp)
-                            .clickable { onCategoryClick(category.name) }
+                            .clickable {
+                                productViewModel.updateCategoryFilter(category.name)
+                                onCategoryClick(category.name)
+                            }
                     ) {
                         Surface(
                             modifier = Modifier.size(56.dp),
                             shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.secondaryContainer
+                            color = if (filterState.category.equals(category.name, ignoreCase = true)) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(
                                     imageVector = category.icon,
                                     contentDescription = category.name,
-                                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    tint = if (filterState.category.equals(category.name, ignoreCase = true)) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer,
                                     modifier = Modifier.size(28.dp)
                                 )
                             }
@@ -244,39 +323,62 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            // Recent Products Section
+            // Products Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Recent Products",
+                    text = if (filterState.isFiltered) "Marketplace Products (${filteredProducts.size})" else "Recent Products",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            if (activeProducts.isEmpty()) {
+            // Empty State handling
+            if (filteredProducts.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(120.dp),
+                        .padding(vertical = 32.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "No products available yet.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.SearchOff,
+                            contentDescription = null,
+                            modifier = Modifier.size(56.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "No products found",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Try changing your search or filters.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                        if (filterState.isFiltered) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            OutlinedButton(onClick = { productViewModel.clearFilters() }) {
+                                Text("Clear Filters")
+                            }
+                        }
+                    }
                 }
             } else {
                 LazyRow(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(activeProducts) { product ->
+                    items(filteredProducts) { product ->
                         ProductCard(
                             product = product,
                             onClick = { onNavigateToProductDetails(product.productId) },
@@ -322,17 +424,28 @@ fun HomeScreen(
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onTertiaryContainer
                         )
-                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "Swap or buy semester books with seniors & peers",
+                            text = "Exchange your course books with fellow students!",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
                         )
                     }
                 }
             }
+        }
 
-            Spacer(modifier = Modifier.height(16.dp))
+        // Filter Sheet Dialog
+        if (showFilterSheet) {
+            FilterBottomSheet(
+                currentFilterState = filterState,
+                onApply = { newFilters ->
+                    productViewModel.updateFilterState(newFilters)
+                },
+                onClear = {
+                    productViewModel.clearFilters()
+                },
+                onDismiss = { showFilterSheet = false }
+            )
         }
     }
 }

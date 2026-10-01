@@ -19,12 +19,43 @@ import com.kartik.studentmart.data.repository.StudMartRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+enum class SortOrder {
+    NEWEST,
+    PRICE_LOW_TO_HIGH,
+    PRICE_HIGH_TO_LOW
+}
+
+data class FilterState(
+    val searchQuery: String = "",
+    val category: String = "All",
+    val minPrice: Double? = null,
+    val maxPrice: Double? = null,
+    val condition: String = "All",
+    val location: String = "",
+    val exchangeAvailableOnly: Boolean = false,
+    val sortOrder: SortOrder = SortOrder.NEWEST
+) {
+    val isFiltered: Boolean
+        get() = searchQuery.isNotBlank() ||
+                (category.isNotBlank() && !category.equals("All", ignoreCase = true)) ||
+                minPrice != null ||
+                maxPrice != null ||
+                (condition.isNotBlank() && !condition.equals("All", ignoreCase = true)) ||
+                location.isNotBlank() ||
+                exchangeAvailableOnly ||
+                sortOrder != SortOrder.NEWEST
+}
 
 class ProductViewModel : ViewModel() {
     private val repository = StudMartRepository()
@@ -45,6 +76,79 @@ class ProductViewModel : ViewModel() {
     // Public active products available for all users
     val activeProducts = repository.getActiveProductsFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Filtering State
+    private val _filterState = MutableStateFlow(FilterState())
+    val filterState: StateFlow<FilterState> = _filterState.asStateFlow()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val filteredProducts: StateFlow<List<Product>> = combine(
+        activeProducts,
+        _filterState
+    ) { products, filters ->
+        products.filter { p ->
+            // 1. ACTIVE status check
+            if (p.status != "ACTIVE") return@filter false
+
+            // 2. Search query (productName or description)
+            if (filters.searchQuery.isNotBlank()) {
+                val query = filters.searchQuery.trim().lowercase()
+                val nameMatch = p.productName.lowercase().contains(query)
+                val descMatch = p.description.lowercase().contains(query)
+                if (!nameMatch && !descMatch) return@filter false
+            }
+
+            // 3. Category filter
+            if (filters.category.isNotBlank() && !filters.category.equals("All", ignoreCase = true)) {
+                if (!p.category.equals(filters.category, ignoreCase = true)) return@filter false
+            }
+
+            // 4. Price range filter
+            if (filters.minPrice != null && p.price < filters.minPrice) return@filter false
+            if (filters.maxPrice != null && p.price > filters.maxPrice) return@filter false
+
+            // 5. Condition filter
+            if (filters.condition.isNotBlank() && !filters.condition.equals("All", ignoreCase = true)) {
+                if (!p.condition.equals(filters.condition, ignoreCase = true)) return@filter false
+            }
+
+            // 6. Location filter
+            if (filters.location.isNotBlank()) {
+                val locQuery = filters.location.trim().lowercase()
+                if (!p.location.lowercase().contains(locQuery)) return@filter false
+            }
+
+            // 7. Exchange filter (ONLY relevant for Books)
+            if (filters.exchangeAvailableOnly) {
+                if (!p.category.equals("Books", ignoreCase = true) || !p.exchangeAvailable) return@filter false
+            }
+
+            true
+        }.let { list ->
+            // 8. Sorting
+            when (filters.sortOrder) {
+                SortOrder.NEWEST -> list.sortedByDescending { it.createdAt }
+                SortOrder.PRICE_LOW_TO_HIGH -> list.sortedBy { it.price }
+                SortOrder.PRICE_HIGH_TO_LOW -> list.sortedByDescending { it.price }
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun updateSearchQuery(query: String) {
+        _filterState.value = _filterState.value.copy(searchQuery = query)
+    }
+
+    fun updateCategoryFilter(category: String) {
+        _filterState.value = _filterState.value.copy(category = category)
+    }
+
+    fun updateFilterState(newFilters: FilterState) {
+        _filterState.value = newFilters
+    }
+
+    fun clearFilters() {
+        _filterState.value = FilterState()
+    }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val userProducts = currentUserIdFlow.flatMapLatest { uid ->
