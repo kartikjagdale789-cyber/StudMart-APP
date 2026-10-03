@@ -8,12 +8,15 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
+import com.kartik.studentmart.data.model.BlockedUser
 import com.kartik.studentmart.data.model.Chat
 import com.kartik.studentmart.data.model.ChatMessage
 import com.kartik.studentmart.data.model.NotificationItem
 import com.kartik.studentmart.data.model.Offer
 import com.kartik.studentmart.data.model.Product
+import com.kartik.studentmart.data.model.PublicProfile
 import com.kartik.studentmart.data.model.PurchaseRequest
+import com.kartik.studentmart.data.model.ReportItem
 import com.kartik.studentmart.data.model.User
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
@@ -43,7 +46,117 @@ class StudMartRepository {
     val currentUserId get() = auth.currentUser?.uid
     val currentUserName get() = auth.currentUser?.displayName ?: auth.currentUser?.email?.substringBefore("@") ?: "Student"
 
-    // User Profile
+    // Safety: Reports & Blocking
+    suspend fun submitReport(report: ReportItem): Result<Unit> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val uid = currentUserId ?: return@withContext Result.failure(Exception("Login required."))
+                val ref = firestore.collection("reports").document()
+                val finalReport = report.copy(
+                    reportId = ref.id,
+                    reporterId = uid,
+                    reporterName = currentUserName,
+                    createdAt = System.currentTimeMillis()
+                )
+                ref.set(finalReport.toMap()).await()
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    fun getAllReportsFlow(): Flow<List<ReportItem>> = callbackFlow {
+        val listener = firestore.collection("reports")
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    Log.e("StudMartAdmin", "Error fetching reports: ${error.message}", error)
+                    trySend(emptyList())
+                    return@addSnapshotListener
+                }
+                val reports = snapshot?.documents?.mapNotNull { doc ->
+                    doc.data?.let { ReportItem.fromMap(it, doc.id) }
+                }?.sortedByDescending { it.createdAt } ?: emptyList()
+                trySend(reports)
+            }
+        awaitClose { listener.remove() }
+    }
+
+    suspend fun updateReportStatus(reportId: String, newStatus: String): Result<Unit> {
+        return withContext(Dispatchers.IO) {
+            try {
+                firestore.collection("reports").document(reportId).update(
+                    mapOf(
+                        "status" to newStatus,
+                        "updatedAt" to System.currentTimeMillis()
+                    )
+                ).await()
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun blockUser(currentUserId: String, blockedUserId: String): Result<Unit> {
+        return withContext(Dispatchers.IO) {
+            try {
+                if (currentUserId == blockedUserId) {
+                    return@withContext Result.failure(Exception("You cannot block yourself."))
+                }
+                val ref = firestore.collection("users").document(currentUserId).collection("blockedUsers").document(blockedUserId)
+                val blocked = BlockedUser(userId = blockedUserId, blockedAt = System.currentTimeMillis())
+                ref.set(blocked.toMap()).await()
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun unblockUser(currentUserId: String, blockedUserId: String): Result<Unit> {
+        return withContext(Dispatchers.IO) {
+            try {
+                firestore.collection("users").document(currentUserId).collection("blockedUsers").document(blockedUserId).delete().await()
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    fun getBlockedUserIdsFlow(currentUserId: String): Flow<Set<String>> = callbackFlow {
+        if (currentUserId.isBlank()) {
+            trySend(emptySet())
+            awaitClose { }
+            return@callbackFlow
+        }
+        val listener = firestore.collection("users").document(currentUserId).collection("blockedUsers")
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    trySend(emptySet())
+                    return@addSnapshotListener
+                }
+                val ids = snapshot?.documents?.mapNotNull { it.getString("userId") ?: it.id }?.toSet() ?: emptySet()
+                trySend(ids)
+            }
+        awaitClose { listener.remove() }
+    }
+
+    suspend fun isBlockedBetween(userId1: String, userId2: String): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                if (userId1.isBlank() || userId2.isBlank()) return@withContext false
+                val doc1 = firestore.collection("users").document(userId1).collection("blockedUsers").document(userId2).get().await()
+                val doc2 = firestore.collection("users").document(userId2).collection("blockedUsers").document(userId1).get().await()
+                doc1.exists() || doc2.exists()
+            } catch (e: Exception) {
+                false
+            }
+        }
+    }
+
+    // User Profile (Private to current user)
     fun getUserProfileFlow(userId: String): Flow<User?> = callbackFlow {
         if (userId.isBlank()) {
             trySend(null)
@@ -53,12 +166,13 @@ class StudMartRepository {
         val docRef = firestore.collection("users").document(userId)
         val listener = docRef.addSnapshotListener { snapshot, error ->
             if (error != null) {
-                Log.e("StudMartProfile", "Error fetching profile: ${error.message}", error)
+                Log.e("StudMartProfile", "Error fetching profile for $userId: ${error.message}", error)
                 trySend(null)
                 return@addSnapshotListener
             }
             if (snapshot == null || !snapshot.exists()) {
-                val authUser = auth.currentUser
+                val isSelf = userId == currentUserId
+                val authUser = if (isSelf) auth.currentUser else null
                 val fallbackName = authUser?.displayName?.ifBlank { null }
                     ?: authUser?.email?.substringBefore("@")
                     ?: "Student"
@@ -66,12 +180,27 @@ class StudMartRepository {
                     userId = userId,
                     fullName = fallbackName,
                     email = authUser?.email ?: "",
+                    phoneNumber = "",
                     profileImageUrl = authUser?.photoUrl?.toString() ?: "",
                     createdAt = System.currentTimeMillis(),
                     updatedAt = System.currentTimeMillis(),
                     role = "student"
                 )
-                docRef.set(fallback.toMap(), SetOptions.merge())
+                if (isSelf && authUser != null) {
+                    try {
+                        docRef.set(fallback.toMap(), SetOptions.merge())
+                        val publicFallback = PublicProfile(
+                            userId = userId,
+                            fullName = fallbackName,
+                            phoneNumber = "",
+                            profileImageUrl = authUser.photoUrl?.toString() ?: "",
+                            updatedAt = System.currentTimeMillis()
+                        )
+                        firestore.collection("publicProfiles").document(userId).set(publicFallback.toMap(), SetOptions.merge())
+                    } catch (e: Exception) {
+                        Log.e("StudMartProfile", "Failed to auto-create user profile", e)
+                    }
+                }
                 trySend(fallback)
             } else {
                 val data = snapshot.data
@@ -85,33 +214,73 @@ class StudMartRepository {
         awaitClose { listener.remove() }
     }
 
-    suspend fun updateUserProfile(userId: String, fullName: String, profileImageUrl: String): Result<Unit> {
+    // Public Profile (Read by marketplace buyers)
+    fun getPublicProfileFlow(sellerId: String): Flow<PublicProfile?> = callbackFlow {
+        if (sellerId.isBlank()) {
+            trySend(null)
+            awaitClose { }
+            return@callbackFlow
+        }
+        val docRef = firestore.collection("publicProfiles").document(sellerId)
+        val listener = docRef.addSnapshotListener { snapshot, error ->
+            if (error != null) {
+                Log.e("StudMartPublicProfile", "Error fetching public profile for $sellerId: ${error.message}", error)
+                trySend(null)
+                return@addSnapshotListener
+            }
+            if (snapshot != null && snapshot.exists() && snapshot.data != null) {
+                val profile = PublicProfile.fromMap(snapshot.data!!, snapshot.id)
+                trySend(profile)
+            } else {
+                trySend(null)
+            }
+        }
+        awaitClose { listener.remove() }
+    }
+
+    suspend fun updateUserProfile(userId: String, fullName: String, phoneNumber: String, profileImageUrl: String): Result<Unit> {
         return withContext(Dispatchers.IO) {
             try {
-                val docRef = firestore.collection("users").document(userId)
-                val doc = docRef.get().await()
-                if (doc.exists() && doc.data != null) {
-                    val updates = mutableMapOf<String, Any>(
-                        "fullName" to fullName.trim(),
-                        "updatedAt" to System.currentTimeMillis()
-                    )
-                    if (profileImageUrl.isNotBlank()) {
-                        updates["profileImageUrl"] = profileImageUrl
-                    }
-                    docRef.update(updates).await()
+                val userDocRef = firestore.collection("users").document(userId)
+                val publicDocRef = firestore.collection("publicProfiles").document(userId)
+
+                val userDoc = userDocRef.get().await()
+                val userUpdates = mutableMapOf<String, Any>(
+                    "fullName" to fullName.trim(),
+                    "phoneNumber" to phoneNumber.trim(),
+                    "updatedAt" to System.currentTimeMillis()
+                )
+                val publicUpdates = mutableMapOf<String, Any>(
+                    "userId" to userId,
+                    "fullName" to fullName.trim(),
+                    "phoneNumber" to phoneNumber.trim(),
+                    "updatedAt" to System.currentTimeMillis()
+                )
+
+                if (profileImageUrl.isNotBlank()) {
+                    userUpdates["profileImageUrl"] = profileImageUrl
+                    publicUpdates["profileImageUrl"] = profileImageUrl
+                }
+
+                if (userDoc.exists()) {
+                    userDocRef.update(userUpdates).await()
                 } else {
                     val authUser = auth.currentUser
                     val newDoc = User(
                         userId = userId,
                         fullName = fullName.trim(),
                         email = authUser?.email ?: "",
+                        phoneNumber = phoneNumber.trim(),
                         profileImageUrl = profileImageUrl,
                         createdAt = System.currentTimeMillis(),
                         updatedAt = System.currentTimeMillis(),
                         role = "student"
                     )
-                    docRef.set(newDoc.toMap()).await()
+                    userDocRef.set(newDoc.toMap()).await()
                 }
+
+                publicDocRef.set(publicUpdates, SetOptions.merge()).await()
+
                 Result.success(Unit)
             } catch (e: Exception) {
                 Log.e("StudMartProfile", "Failed to update profile", e)
@@ -140,8 +309,9 @@ class StudMartRepository {
 
                 try {
                     firestore.collection("users").document(uid).delete().await()
+                    firestore.collection("publicProfiles").document(uid).delete().await()
                 } catch (e: Exception) {
-                    Log.e("StudMartDelete", "Failed to delete user Firestore profile", e)
+                    Log.e("StudMartDelete", "Failed to delete user profile", e)
                 }
 
                 user.delete().await()
@@ -271,27 +441,13 @@ class StudMartRepository {
         val listener = firestore.collection("products")
             .whereEqualTo("status", "ACTIVE")
             .addSnapshotListener { snapshot, error ->
-                Log.d("StudMartMarketplace", "MARKETPLACE QUERY START")
-                Log.d("StudMartMarketplace", "current UID: ${currentUserId ?: "Anonymous"}")
-                Log.d("StudMartMarketplace", "collection name: products")
-
                 if (error != null) {
-                    Log.e("StudMartMarketplace", "Firestore Error: ${error.message}", error)
                     trySend(emptyList())
                     return@addSnapshotListener
                 }
-
-                val docs = snapshot?.documents ?: emptyList()
-                Log.d("StudMartMarketplace", "number of documents returned: ${docs.size}")
-
-                val products = docs.mapNotNull { doc ->
-                    doc.data?.let {
-                        val p = Product.fromMap(it, doc.id)
-                        Log.d("StudMartMarketplace", "Product -> productId: ${p.productId}, sellerId: ${p.sellerId}, status: ${p.status}")
-                        p
-                    }
-                }.sortedByDescending { it.createdAt }
-
+                val products = snapshot?.documents?.mapNotNull { doc ->
+                    doc.data?.let { Product.fromMap(it, doc.id) }
+                }?.sortedByDescending { it.createdAt } ?: emptyList()
                 trySend(products)
             }
         awaitClose { listener.remove() }
@@ -416,6 +572,10 @@ class StudMartRepository {
 
                 if (buyerId == product.sellerId) {
                     return@withContext Result.failure(Exception("You cannot purchase your own product."))
+                }
+
+                if (isBlockedBetween(buyerId, product.sellerId)) {
+                    return@withContext Result.failure(Exception("You can't purchase because one of you has blocked the other."))
                 }
 
                 val productDoc = firestore.collection("products").document(product.productId).get().await()
@@ -582,6 +742,10 @@ class StudMartRepository {
                     return@withContext Result.failure(Exception("You cannot make an offer on your own product."))
                 }
 
+                if (isBlockedBetween(buyerId, product.sellerId)) {
+                    return@withContext Result.failure(Exception("You can't make an offer to this user because one of you has blocked the other."))
+                }
+
                 val productDoc = firestore.collection("products").document(product.productId).get().await()
                 val latestStatus = productDoc.getString("status") ?: "ACTIVE"
                 if (latestStatus == "SOLD") {
@@ -682,6 +846,10 @@ class StudMartRepository {
                 }
                 if (offeredProduct.productId == requestedProduct.productId) {
                     return@withContext Result.failure(Exception("You cannot exchange a product for itself."))
+                }
+
+                if (isBlockedBetween(buyerId, requestedProduct.sellerId)) {
+                    return@withContext Result.failure(Exception("You can't exchange with this user because one of you has blocked the other."))
                 }
 
                 // 1. Verify requested product is a Book and exchange is allowed
@@ -1029,6 +1197,10 @@ class StudMartRepository {
                     return@withContext Result.failure(Exception("You cannot chat with yourself."))
                 }
 
+                if (isBlockedBetween(buyerId, product.sellerId)) {
+                    return@withContext Result.failure(Exception("You can't chat with this user because one of you has blocked the other."))
+                }
+
                 val productDoc = firestore.collection("products").document(product.productId).get().await()
                 val latestStatus = productDoc.getString("status") ?: "ACTIVE"
                 if (latestStatus == "SOLD") {
@@ -1153,6 +1325,13 @@ class StudMartRepository {
                 val userId = currentUserId ?: return@withContext Result.failure(Exception("Login required."))
                 val userName = currentUserName
 
+                val chatDoc = firestore.collection("chats").document(chatId).get().await()
+                val buyerId = chatDoc.getString("buyerId") ?: ""
+                val sellerId = chatDoc.getString("sellerId") ?: ""
+                if (isBlockedBetween(buyerId, sellerId)) {
+                    return@withContext Result.failure(Exception("You can't send messages because one of you has blocked the other."))
+                }
+
                 val msgRef = firestore.collection("chats").document(chatId).collection("messages").document()
                 val message = ChatMessage(
                     messageId = msgRef.id,
@@ -1171,10 +1350,6 @@ class StudMartRepository {
                     )
                 ).await()
 
-                // NOTIFICATION: NEW_MESSAGE to the other chat participant
-                val chatDoc = firestore.collection("chats").document(chatId).get().await()
-                val buyerId = chatDoc.getString("buyerId") ?: ""
-                val sellerId = chatDoc.getString("sellerId") ?: ""
                 val recipientId = if (userId == buyerId) sellerId else buyerId
                 if (recipientId.isNotBlank() && recipientId != userId) {
                     createNotification(
@@ -1319,7 +1494,6 @@ class StudMartRepository {
                 if (sellerId != userId) {
                     return@withContext Result.failure(Exception("Only the product seller can mark it as sold."))
                 }
-                val productName = productDoc.getString("productName") ?: "Product"
 
                 // 1. Update product status to SOLD
                 firestore.collection("products").document(productId).update(
@@ -1337,6 +1511,7 @@ class StudMartRepository {
 
                 for (offerDoc in acceptedOffers.documents) {
                     val buyerId = offerDoc.getString("buyerId") ?: ""
+                    val productName = offerDoc.getString("productName") ?: productDoc.getString("productName") ?: ""
                     if (buyerId.isNotBlank()) {
                         createNotification(
                             recipientId = buyerId,

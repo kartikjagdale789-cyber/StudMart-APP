@@ -250,7 +250,10 @@ fun AppNavigation() {
                 )
             }
             composable(Screen.AdminDashboard.route) {
-                AdminDashboardScreen(onBack = { navController.popBackStack() })
+                AdminDashboardScreen(
+                    onBack = { navController.popBackStack() },
+                    onNavigateToDetails = { productId -> navController.navigate(Screen.ProductDetails.createRoute(productId)) }
+                )
             }
         }
     }

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
@@ -23,6 +24,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
@@ -53,6 +55,7 @@ fun ProfileScreen(
 
     var showEditProfileDialog by remember { mutableStateOf(false) }
     var editName by remember { mutableStateOf("") }
+    var editPhone by remember { mutableStateOf("") }
     var editProfileImageUrl by remember { mutableStateOf("") }
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
     var isUploadingImage by remember { mutableStateOf(false) }
@@ -166,12 +169,33 @@ fun ProfileScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
 
+                            val phoneStr = userProfile?.phoneNumber ?: ""
+                            if (phoneStr.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Phone,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = phoneStr,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+
                             Spacer(modifier = Modifier.height(16.dp))
 
                             OutlinedButton(
                                 onClick = {
                                     productViewModel.clearMessages()
                                     editName = userProfile?.fullName ?: ""
+                                    editPhone = userProfile?.phoneNumber ?: ""
                                     editProfileImageUrl = userProfile?.profileImageUrl ?: ""
                                     selectedImageUri = null
                                     showEditProfileDialog = true
@@ -315,6 +339,18 @@ fun ProfileScreen(
                                 modifier = Modifier.fillMaxWidth()
                             )
 
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            OutlinedTextField(
+                                value = editPhone,
+                                onValueChange = { if (it.length <= 10 && it.all { char -> char.isDigit() }) editPhone = it },
+                                label = { Text("Mobile Number (10 digits) *") },
+                                singleLine = true,
+                                enabled = !isActionLoading,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
                             if (productViewModel.errorMessage != null) {
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text(
@@ -328,7 +364,7 @@ fun ProfileScreen(
                     confirmButton = {
                         Button(
                             onClick = {
-                                productViewModel.updateUserProfile(editName, editProfileImageUrl) { success ->
+                                productViewModel.updateUserProfile(editName, editPhone, editProfileImageUrl) { success ->
                                     if (success) {
                                         showEditProfileDialog = false
                                     }

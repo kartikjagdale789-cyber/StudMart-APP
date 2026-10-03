@@ -2,6 +2,7 @@ package com.kartik.studentmart.data.repository
 
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.kartik.studentmart.data.model.PublicProfile
 import com.kartik.studentmart.data.model.User
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.tasks.await
@@ -39,9 +40,18 @@ class AuthRepository {
                 phoneNumber = phone
             )
 
+            val publicProfile = PublicProfile(
+                userId = userId,
+                fullName = fullName,
+                phoneNumber = phone,
+                profileImageUrl = "",
+                updatedAt = System.currentTimeMillis()
+            )
+
             try {
                 withTimeout(10000L) {
                     firestore.collection("users").document(userId).set(user.toMap()).await()
+                    firestore.collection("publicProfiles").document(userId).set(publicProfile.toMap()).await()
                 }
             } catch (e: TimeoutCancellationException) {
                 return Result.failure(Exception("Cloud Firestore request timed out. Please ensure Cloud Firestore is enabled in your Firebase Console."))

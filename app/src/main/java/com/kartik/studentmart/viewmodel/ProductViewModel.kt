@@ -13,7 +13,9 @@ import com.kartik.studentmart.data.model.ChatMessage
 import com.kartik.studentmart.data.model.NotificationItem
 import com.kartik.studentmart.data.model.Offer
 import com.kartik.studentmart.data.model.Product
+import com.kartik.studentmart.data.model.PublicProfile
 import com.kartik.studentmart.data.model.PurchaseRequest
+import com.kartik.studentmart.data.model.ReportItem
 import com.kartik.studentmart.data.model.User
 import com.kartik.studentmart.data.repository.StudMartRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -77,6 +79,11 @@ class ProductViewModel : ViewModel() {
     val activeProducts = repository.getActiveProductsFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val blockedUserIds = currentUserIdFlow.flatMapLatest { uid ->
+        if (uid.isNullOrBlank()) flowOf(emptySet()) else repository.getBlockedUserIdsFlow(uid)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
     // Filtering State
     private val _filterState = MutableStateFlow(FilterState())
     val filterState: StateFlow<FilterState> = _filterState.asStateFlow()
@@ -84,11 +91,15 @@ class ProductViewModel : ViewModel() {
     @OptIn(ExperimentalCoroutinesApi::class)
     val filteredProducts: StateFlow<List<Product>> = combine(
         activeProducts,
-        _filterState
-    ) { products, filters ->
+        _filterState,
+        blockedUserIds
+    ) { products, filters, blockedIds ->
         products.filter { p ->
             // 1. ACTIVE status check
             if (p.status != "ACTIVE") return@filter false
+
+            // 1b. Blocked seller check
+            if (blockedIds.contains(p.sellerId)) return@filter false
 
             // 2. Search query (productName or description)
             if (filters.searchQuery.isNotBlank()) {
@@ -151,6 +162,83 @@ class ProductViewModel : ViewModel() {
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
+    val allReports = currentUserIdFlow.flatMapLatest { uid ->
+        if (uid.isNullOrBlank()) flowOf(emptyList()) else repository.getAllReportsFlow()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun updateReportStatus(reportId: String, newStatus: String) {
+        viewModelScope.launch {
+            try {
+                val result = repository.updateReportStatus(reportId, newStatus)
+                result.onFailure { err ->
+                    errorMessage = err.message ?: "Failed to update report status."
+                }
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "Failed to update report status."
+            }
+        }
+    }
+
+    fun submitReport(report: ReportItem, onSuccess: () -> Unit) {
+        viewModelScope.launch {
+            try {
+                val result = repository.submitReport(report)
+                result.fold(
+                    onSuccess = {
+                        successMessage = "Report submitted successfully."
+                        onSuccess()
+                    },
+                    onFailure = { err ->
+                        errorMessage = err.message ?: "Failed to submit report."
+                    }
+                )
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "Failed to submit report."
+            }
+        }
+    }
+
+    fun blockUser(blockedUserId: String, onSuccess: () -> Unit) {
+        val uid = currentUserId ?: return
+        viewModelScope.launch {
+            try {
+                val result = repository.blockUser(uid, blockedUserId)
+                result.fold(
+                    onSuccess = {
+                        successMessage = "User blocked successfully."
+                        onSuccess()
+                    },
+                    onFailure = { err ->
+                        errorMessage = err.message ?: "Failed to block user."
+                    }
+                )
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "Failed to block user."
+            }
+        }
+    }
+
+    fun unblockUser(blockedUserId: String, onSuccess: () -> Unit) {
+        val uid = currentUserId ?: return
+        viewModelScope.launch {
+            try {
+                val result = repository.unblockUser(uid, blockedUserId)
+                result.fold(
+                    onSuccess = {
+                        successMessage = "User unblocked successfully."
+                        onSuccess()
+                    },
+                    onFailure = { err ->
+                        errorMessage = err.message ?: "Failed to unblock user."
+                    }
+                )
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "Failed to unblock user."
+            }
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
     val userProducts = currentUserIdFlow.flatMapLatest { uid ->
         if (uid.isNullOrBlank()) flowOf(emptyList()) else repository.getUserProductsFlow(uid)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -159,6 +247,10 @@ class ProductViewModel : ViewModel() {
     val userProfile = currentUserIdFlow.flatMapLatest { uid ->
         if (uid.isNullOrBlank()) flowOf(null) else repository.getUserProfileFlow(uid)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    fun getUserProfileFlow(userId: String): Flow<User?> = repository.getUserProfileFlow(userId)
+
+    fun getPublicProfileFlow(sellerId: String): Flow<PublicProfile?> = repository.getPublicProfileFlow(sellerId)
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val wishlistProductIds = currentUserIdFlow.flatMapLatest { uid ->
@@ -254,7 +346,7 @@ class ProductViewModel : ViewModel() {
         }
     }
 
-    fun updateUserProfile(fullName: String, profileImageUrl: String, onResult: (Boolean) -> Unit) {
+    fun updateUserProfile(fullName: String, phoneNumber: String, profileImageUrl: String, onResult: (Boolean) -> Unit) {
         val uid = currentUserId
         if (uid == null) {
             errorMessage = "User not logged in."
@@ -266,11 +358,23 @@ class ProductViewModel : ViewModel() {
             onResult(false)
             return
         }
+        val cleanPhone = phoneNumber.trim()
+        if (cleanPhone.isBlank()) {
+            errorMessage = "Mobile number cannot be empty."
+            onResult(false)
+            return
+        }
+        if (cleanPhone.length != 10 || !cleanPhone.all { it.isDigit() }) {
+            errorMessage = "Please enter a valid 10-digit mobile number."
+            onResult(false)
+            return
+        }
+
         isLoading = true
         errorMessage = null
         viewModelScope.launch {
             try {
-                val result = repository.updateUserProfile(uid, fullName, profileImageUrl)
+                val result = repository.updateUserProfile(uid, fullName, cleanPhone, profileImageUrl)
                 isLoading = false
                 result.fold(
                     onSuccess = {
